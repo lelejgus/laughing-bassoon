@@ -1,0 +1,178 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate Android project
+        run: |
+          mkdir -p proj/app/src/main/java/com/village/game proj/app/src/main/assets/game
+          cp index.html proj/app/src/main/assets/game/index.html
+
+          cat > proj/settings.gradle <<'EOF'
+          pluginManagement {
+            repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+            repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "village"
+          include ':app'
+          EOF
+
+          cat > proj/build.gradle <<'EOF'
+          plugins {
+            id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > proj/app/build.gradle <<'EOF'
+          plugins {
+            id 'com.android.application'
+          }
+          android {
+            namespace 'com.village.game'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.village.game'
+              minSdk 21
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+
+          cat > proj/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application
+                android:label="Деревня"
+                android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+              <activity
+                  android:name=".MainActivity"
+                  android:exported="true"
+                  android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+          cat > proj/app/src/main/java/com/village/game/MainActivity.java <<'EOF'
+          package com.village.game;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.WindowManager;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+
+          public class MainActivity extends Activity {
+            private WebView web;
+            private boolean started = false;
+
+            // Папка игры: Android/data/com.village.game/files/game
+            private File gameDir() {
+              return new File(getExternalFilesDir(null), "game");
+            }
+
+            // Копирует стандартную игру, если index.html ещё нет
+            private void copyDefaults() {
+              File dir = gameDir();
+              File idx = new File(dir, "index.html");
+              if (idx.exists()) return;
+              dir.mkdirs();
+              try (InputStream in = getAssets().open("game/index.html");
+                   OutputStream out = new FileOutputStream(idx)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+              } catch (Exception e) {
+                e.printStackTrace();
+              }
+            }
+
+            private void loadGame() {
+              web.loadUrl("file://" + new File(gameDir(), "index.html").getAbsolutePath());
+            }
+
+            @Override
+            protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+              web = new WebView(this);
+              setContentView(web);
+              WebSettings s = web.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);
+              s.setAllowFileAccess(true);
+              s.setAllowFileAccessFromFileURLs(true);
+              s.setAllowUniversalAccessFromFileURLs(true);
+              web.setWebViewClient(new WebViewClient());
+              copyDefaults();
+              loadGame();
+              started = true;
+            }
+
+            // После возврата в приложение игра перезагружается (применяются правки файлов)
+            @Override
+            protected void onResume() {
+              super.onResume();
+              web.onResume();
+              if (started) web.reload();
+            }
+
+            @Override
+            protected void onPause() {
+              super.onPause();
+              web.onPause();
+            }
+          }
+          EOF
+
+      - name: Build
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Деревня (сборка ${{ github.run_number }})
+          files: proj/app/build/outputs/apk/debug/app-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: village-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
