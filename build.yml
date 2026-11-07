@@ -1,0 +1,65 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Собираем game.love: берём готовый topdown.love из корня,
+      # а если его нет, но лежит main.lua — пакуем весь репозиторий.
+      - name: Pack game.love
+        run: |
+          if [ -f topdown.love ]; then
+            cp topdown.love /tmp/game.love
+          elif [ -f main.lua ]; then
+            zip -qr /tmp/game.love . -x '.git/*' '.github/*' '*.love' '*.apk'
+          else
+            echo "В корне нет ни topdown.love, ни main.lua"
+            exit 1
+          fi
+          unzip -l /tmp/game.love | head -30
+
+      # Движок LÖVE для Android (версия 11.5)
+      - name: Get love-android
+        run: |
+          git clone --depth 1 --branch 11.5 --recurse-submodules --shallow-submodules \
+            https://github.com/love2d/love-android.git
+          mkdir -p love-android/app/src/embed/assets
+          cp /tmp/game.love love-android/app/src/embed/assets/game.love
+
+      - name: Build
+        working-directory: love-android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleEmbedNoRecordDebug --no-daemon
+
+      - name: Find APK
+        run: |
+          APK=$(find love-android/app/build/outputs/apk -name '*.apk' | head -1)
+          echo "Нашёл: $APK"
+          cp "$APK" topdown.apk
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Top-Down (сборка ${{ github.run_number }})
+          files: topdown.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: topdown-apk
+          path: topdown.apk
